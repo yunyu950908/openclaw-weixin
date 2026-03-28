@@ -95,7 +95,7 @@ jobs:
           gh pr list --search "is:open head:sync/" --json number --jq '.[].number' | \
             xargs -I {} gh pr close {} --comment "Superseded by v${LATEST}" 2>/dev/null || true
 
-          gh pr create \
+          PR_URL=$(gh pr create \
             --title "chore: sync @tencent-weixin/openclaw-weixin v${LATEST}" \
             --body "$(cat <<EOF
           ## Summary
@@ -107,4 +107,18 @@ jobs:
           EOF
           )" \
             --base main \
-            --head "$BRANCH"
+            --head "$BRANCH")
+
+          echo "PR created: $PR_URL"
+
+          # 检查是否可合并（无冲突）
+          MERGEABLE=$(gh pr view "$PR_URL" --json mergeable --jq '.mergeable')
+          echo "Mergeable status: $MERGEABLE"
+
+          if [ "$MERGEABLE" = "MERGEABLE" ]; then
+            gh pr review "$PR_URL" --approve
+            gh pr merge "$PR_URL" --squash --delete-branch
+            echo "PR merged successfully."
+          else
+            echo "PR has conflicts or is not mergeable. Skipping auto-merge."
+          fi
