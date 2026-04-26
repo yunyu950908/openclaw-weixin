@@ -1,0 +1,50 @@
+name: Auto-merge sync PRs
+
+on:
+  workflow_run:
+    workflows: ["Sync openclaw-weixin package"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find and merge bot PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # 找最新的、bot 创建的、sync/ 开头分支的 open PR
+          PR_NUMBER=$(gh pr list \
+            --search "is:open head:sync/ author:app/github-actions" \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No matching bot PR found. Nothing to merge."
+            exit 0
+          fi
+
+          echo "Found PR #$PR_NUMBER"
+
+          # 轮询等待 mergeable 计算完成 (GitHub 后台需要几秒)
+          MERGEABLE="UNKNOWN"
+          for i in $(seq 1 10); do
+            MERGEABLE=$(gh pr view "$PR_NUMBER" --json mergeable --jq '.mergeable')
+            echo "Attempt $i: mergeable=$MERGEABLE"
+            [ "$MERGEABLE" != "UNKNOWN" ] && break
+            sleep 3
+          done
+
+          if [ "$MERGEABLE" = "MERGEABLE" ]; then
+            gh pr review "$PR_NUMBER" --approve
+            gh pr merge "$PR_NUMBER" --squash --delete-branch
+            echo "PR #$PR_NUMBER merged."
+          else
+            echo "PR #$PR_NUMBER not mergeable (status: $MERGEABLE). Manual review required."
+          fi
