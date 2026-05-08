@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk/core";
+import type { ChannelPlugin, OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk/core";
 import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
 
@@ -23,6 +23,7 @@ import {
   DEFAULT_ILINK_BOT_TYPE,
   startWeixinLoginWithQr,
   waitForWeixinLogin,
+  displayQRCode,
 } from "./auth/login-qr.js";
 import type { WeixinQrStartResult, WeixinQrWaitResult } from "./auth/login-qr.js";
 // Lazy-imported inside startAccount to avoid pulling in the monitor -> process-message ->
@@ -320,7 +321,7 @@ export const weixinPlugin: ChannelPlugin<ResolvedWeixinAccount> = {
         runtime?.log?.(msg);
       };
 
-      log(`正在启动微信扫码登录...`);
+      log(`正在启动...`);
       const startResult: WeixinQrStartResult = await startWeixinLoginWithQr({
         accountId: account.accountId,
         apiBaseUrl: account.baseUrl,
@@ -336,27 +337,11 @@ export const weixinPlugin: ChannelPlugin<ResolvedWeixinAccount> = {
         throw new Error(startResult.message);
       }
 
-      log(`\n使用微信扫描以下二维码，以完成连接：\n`);
-      try {
-        const qrcodeterminal = await import("qrcode-terminal");
-        await new Promise<void>((resolve) => {
-          qrcodeterminal.default.generate(startResult.qrcodeUrl!, { small: true }, (qr: string) => {
-            console.log(qr);
-            log(`如果二维码未能成功展示，请用浏览器打开以下链接扫码：`);
-            log(startResult.qrcodeUrl!);
-            resolve();
-          });
-        });
-      } catch (err) {
-        logger.warn(
-          `auth.login: qrcode-terminal unavailable, falling back to URL err=${String(err)}`,
-        );
-        log(`二维码未加载成功，请用浏览器打开以下链接扫码：`);
-        log(startResult.qrcodeUrl!);
-      }
+      log(`\n用手机微信扫描以下二维码，以继续连接：\n`);
+      await displayQRCode(startResult.qrcodeUrl!);
 
       const loginTimeoutMs = 480_000;
-      log(`\n等待连接结果...\n`);
+      log(`\n正在等待操作...\n`);
 
       const waitResult: WeixinQrWaitResult = await waitForWeixinLogin({
         sessionKey: startResult.sessionKey,
@@ -381,7 +366,7 @@ export const weixinPlugin: ChannelPlugin<ResolvedWeixinAccount> = {
             clearStaleAccountsForUserId(normalizedId, waitResult.userId, clearContextTokensForAccount);
           }
           void triggerWeixinChannelReload();
-          log(`\n✅ 与微信连接成功！`);
+          log(`\n已将此 OpenClaw 连接到微信。`);
         } catch (err) {
           logger.error(
             `auth.login: failed to save account data accountId=${waitResult.accountId} err=${String(err)}`,
@@ -443,6 +428,17 @@ export const weixinPlugin: ChannelPlugin<ResolvedWeixinAccount> = {
       const logPath = aLog.getLogFilePath();
       ctx.log?.info?.(`[${account.accountId}] weixin logs: ${logPath}`);
 
+      // The gateway injects the channel runtime surface per-call (task-scoped). We require it:
+      // it carries reply/routing/session/media/commands helpers used by processOneMessage.
+      // Available on hosts >= 2026.2.19 (our peerDependency is >= 2026.3.22).
+      if (!ctx.channelRuntime) {
+        const msg = `ctx.channelRuntime missing — host too old or plugin SDK contract violated`;
+        aLog.error(msg);
+        ctx.log?.error?.(`[${account.accountId}] ${msg}`);
+        ctx.setStatus?.({ accountId: account.accountId, running: false });
+        throw new Error(msg);
+      }
+
       const { monitorWeixinProvider } = await import("./monitor/monitor.js");
       return monitorWeixinProvider({
         baseUrl: account.baseUrl,
@@ -451,6 +447,7 @@ export const weixinPlugin: ChannelPlugin<ResolvedWeixinAccount> = {
         accountId: account.accountId,
         config: ctx.cfg,
         runtime: ctx.runtime,
+        channelRuntime: ctx.channelRuntime as unknown as PluginRuntime["channel"],
         abortSignal: ctx.abortSignal,
         setStatus: ctx.setStatus,
       });
@@ -474,7 +471,7 @@ export const weixinPlugin: ChannelPlugin<ResolvedWeixinAccount> = {
         aLog.warn(`notifyStop failed during shutdown (ignored): ${String(err)}`);
       }
     },
-    loginWithQrStart: async ({ accountId, force, timeoutMs, verbose }) => {
+    loginWithQrStart: async ({ accountId, force, verbose }) => {
       // For re-login: use saved baseUrl from account data; fall back to default for new accounts.
       const savedBaseUrl = accountId ? loadWeixinAccount(accountId)?.baseUrl?.trim() : "";
       const result: WeixinQrStartResult = await startWeixinLoginWithQr({
@@ -482,7 +479,6 @@ export const weixinPlugin: ChannelPlugin<ResolvedWeixinAccount> = {
         apiBaseUrl: savedBaseUrl || DEFAULT_BASE_URL,
         botType: DEFAULT_ILINK_BOT_TYPE,
         force,
-        timeoutMs,
         verbose,
       });
       // Return sessionKey so the client can pass it back in loginWithQrWait.
