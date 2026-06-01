@@ -42,7 +42,7 @@ jobs:
           done
 
           if [ "$MERGEABLE" = "MERGEABLE" ]; then
-            gh pr review "$PR_NUMBER" --approve
+            # PR is created by github-actions[bot], so GITHUB_TOKEN cannot approve it.
             gh pr merge "$PR_NUMBER" --squash --delete-branch
             echo "PR #$PR_NUMBER merged."
           else
