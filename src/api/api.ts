@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadConfigRouteTag } from "../auth/accounts.js";
+import { loadConfigBotAgent, loadConfigRouteTag } from "../auth/accounts.js";
 import { logger } from "../util/logger.js";
 import { redactBody, redactUrl } from "../util/redact.js";
 
@@ -38,14 +38,49 @@ interface PackageJson {
   ilink_appid?: string;
 }
 
-function readPackageJson(): PackageJson {
+/**
+ * Identify whether a parsed package.json belongs to this plugin.
+ *
+ * The walk-up search may pass through unrelated `package.json` files
+ * (e.g. nested `node_modules/<dep>/package.json`); only ours is accepted.
+ */
+function isOwnPackageJson(parsed: PackageJson): boolean {
+  if (parsed.ilink_appid !== undefined) return true;
+  return typeof parsed.name === "string" && parsed.name.includes("openclaw-weixin");
+}
+
+/**
+ * Walk up from `startDir` searching for the plugin's own `package.json`.
+ *
+ * Resilient to differing layouts between dev (TS source under `src/`) and
+ * publish (compiled output under `dist/src/`) by not assuming a fixed depth.
+ */
+export function readPackageJsonFromDir(startDir: string): PackageJson {
   try {
-    const dir = path.dirname(fileURLToPath(import.meta.url));
-    const pkgPath = path.resolve(dir, "..", "..", "package.json");
-    return JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as PackageJson;
+    let dir = startDir;
+    const { root } = path.parse(dir);
+    while (dir && dir !== root) {
+      const candidate = path.join(dir, "package.json");
+      if (fs.existsSync(candidate)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(candidate, "utf-8")) as PackageJson;
+          if (isOwnPackageJson(parsed)) {
+            return parsed;
+          }
+        } catch {
+          // Malformed package.json — keep walking up.
+        }
+      }
+      dir = path.dirname(dir);
+    }
   } catch {
-    return {};
+    // Fall through to empty default.
   }
+  return {};
+}
+
+function readPackageJson(): PackageJson {
+  return readPackageJsonFromDir(path.dirname(fileURLToPath(import.meta.url)));
 }
 
 const pkg = readPackageJson();
@@ -70,9 +105,105 @@ function buildClientVersion(version: string): number {
 
 const ILINK_APP_CLIENT_VERSION: number = buildClientVersion(pkg.version ?? "0.0.0");
 
+/**
+ * Default `bot_agent` value used when the upstream app does not declare one.
+ * Mirrors the role of HTTP `User-Agent`'s implicit "no UA" fallback.
+ */
+const DEFAULT_BOT_AGENT = "OpenClaw";
+
+/** Maximum length (bytes) of the sanitized `bot_agent` string. */
+const BOT_AGENT_MAX_LEN = 256;
+
+/**
+ * Sanitize a user-supplied `botAgent` config value into a wire-safe string.
+ *
+ * Grammar (UA-style):
+ *   bot_agent = product *( SP product )
+ *   product   = name "/" version [ SP "(" comment ")" ]
+ *   name      = 1*32( ALPHA / DIGIT / "_" / "." / "-" )
+ *   version   = 1*32( ALPHA / DIGIT / "_" / "." / "+" / "-" )
+ *   comment   = 1*64( printable ASCII minus "(" ")" )
+ *
+ * Tokens that fail to parse are dropped silently (no partial tokens kept).
+ * Returns `DEFAULT_BOT_AGENT` when the input is empty / all tokens dropped /
+ * the result exceeds the length cap after truncation.
+ */
+export function sanitizeBotAgent(raw: string | undefined): string {
+  if (!raw || typeof raw !== "string") return DEFAULT_BOT_AGENT;
+  const trimmed = raw.trim();
+  if (!trimmed) return DEFAULT_BOT_AGENT;
+
+  const productRe = /^[A-Za-z0-9_.\-]{1,32}\/[A-Za-z0-9_.+\-]{1,32}$/;
+  const commentCharRe = /^[\x20-\x27\x2A-\x7E]{1,64}$/;
+
+  // Tokenize on whitespace, but keep `(comment)` glued to the preceding product.
+  // Strategy: split by spaces, then re-attach any token that starts with "(".
+  const rawTokens = trimmed.split(/\s+/);
+  const tokens: string[] = [];
+  for (let i = 0; i < rawTokens.length; i += 1) {
+    const tok = rawTokens[i];
+    if (tok.startsWith("(") && !tok.endsWith(")")) {
+      // Multi-word comment; greedily collect until we find the closing ")".
+      let acc = tok;
+      while (i + 1 < rawTokens.length && !acc.endsWith(")")) {
+        i += 1;
+        acc += " " + rawTokens[i];
+      }
+      tokens.push(acc);
+    } else {
+      tokens.push(tok);
+    }
+  }
+
+  const accepted: string[] = [];
+  let pendingProduct: string | null = null;
+  for (const tok of tokens) {
+    if (tok.startsWith("(") && tok.endsWith(")")) {
+      const inner = tok.slice(1, -1);
+      if (pendingProduct && commentCharRe.test(inner)) {
+        accepted.push(`${pendingProduct} (${inner})`);
+        pendingProduct = null;
+      } else {
+        if (pendingProduct) {
+          accepted.push(pendingProduct);
+          pendingProduct = null;
+        }
+      }
+      continue;
+    }
+    if (pendingProduct) {
+      accepted.push(pendingProduct);
+      pendingProduct = null;
+    }
+    if (productRe.test(tok)) {
+      pendingProduct = tok;
+    }
+  }
+  if (pendingProduct) accepted.push(pendingProduct);
+
+  if (accepted.length === 0) return DEFAULT_BOT_AGENT;
+
+  const joined = accepted.join(" ");
+  if (Buffer.byteLength(joined, "utf-8") <= BOT_AGENT_MAX_LEN) return joined;
+
+  // Truncate by dropping trailing tokens until under the cap.
+  const truncated: string[] = [];
+  let len = 0;
+  for (const t of accepted) {
+    const add = (truncated.length === 0 ? 0 : 1) + Buffer.byteLength(t, "utf-8");
+    if (len + add > BOT_AGENT_MAX_LEN) break;
+    truncated.push(t);
+    len += add;
+  }
+  return truncated.length > 0 ? truncated.join(" ") : DEFAULT_BOT_AGENT;
+}
+
 /** Build the `base_info` payload included in every API request. */
 export function buildBaseInfo(): BaseInfo {
-  return { channel_version: CHANNEL_VERSION };
+  return {
+    channel_version: CHANNEL_VERSION,
+    bot_agent: sanitizeBotAgent(loadConfigBotAgent()),
+  };
 }
 
 /** Default timeout for long-poll getUpdates requests. */
@@ -105,11 +236,10 @@ function buildCommonHeaders(): Record<string, string> {
   return headers;
 }
 
-function buildHeaders(opts: { token?: string; body: string }): Record<string, string> {
+function buildHeaders(opts: { token?: string }): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     AuthorizationType: "ilink_bot_token",
-    "Content-Length": String(Buffer.byteLength(opts.body, "utf-8")),
     "X-WECHAT-UIN": randomWechatUin(),
     ...buildCommonHeaders(),
   };
@@ -166,32 +296,74 @@ export async function apiGetFetch(params: {
 }
 
 /**
- * Common fetch wrapper: POST JSON to a Weixin API endpoint with timeout + abort.
- * Returns the raw response text on success; throws on HTTP error or timeout.
+ * Combine an internal timeout controller with an optional external abort signal.
+ * This lets gateway channel-stop aborts cancel in-flight long-poll requests
+ * immediately while preserving the existing timeout-driven AbortError path.
  */
-async function apiPostFetch(params: {
+function combineAbortSignals(params: {
+  internal?: AbortController;
+  external?: AbortSignal;
+}): { signal?: AbortSignal; cleanup: () => void } {
+  const { internal, external } = params;
+  if (!external) {
+    return { signal: internal?.signal, cleanup: () => {} };
+  }
+  if (!internal) {
+    return { signal: external, cleanup: () => {} };
+  }
+  if (external.aborted) {
+    internal.abort();
+    return { signal: internal.signal, cleanup: () => {} };
+  }
+  const onExternalAbort = () => internal.abort();
+  external.addEventListener("abort", onExternalAbort, { once: true });
+  return {
+    signal: internal.signal,
+    cleanup: () => external.removeEventListener("abort", onExternalAbort),
+  };
+}
+
+/**
+ * Common fetch wrapper: POST JSON to a Weixin API endpoint.
+ * When `timeoutMs` is provided, the request is aborted after that many milliseconds.
+ * When omitted, no client-side timeout is applied (relies on OS/TCP stack).
+ * Returns the raw response text on success; throws on HTTP error or timeout.
+ *
+ * When `abortSignal` is provided, an external abort (e.g. gateway channel stop)
+ * cancels the in-flight request immediately instead of waiting for `timeoutMs`.
+ */
+export async function apiPostFetch(params: {
   baseUrl: string;
   endpoint: string;
   body: string;
   token?: string;
-  timeoutMs: number;
+  timeoutMs?: number;
   label: string;
+  abortSignal?: AbortSignal;
 }): Promise<string> {
   const base = ensureTrailingSlash(params.baseUrl);
   const url = new URL(params.endpoint, base);
-  const hdrs = buildHeaders({ token: params.token, body: params.body });
+  const hdrs = buildHeaders({ token: params.token });
   logger.debug(`POST ${redactUrl(url.toString())} body=${redactBody(params.body)}`);
 
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), params.timeoutMs);
+  const controller =
+    params.timeoutMs !== undefined ? new AbortController() : undefined;
+  const t =
+    controller != null && params.timeoutMs !== undefined
+      ? setTimeout(() => controller.abort(), params.timeoutMs)
+      : undefined;
+  const { signal, cleanup } = combineAbortSignals({
+    internal: controller,
+    external: params.abortSignal,
+  });
   try {
     const res = await fetch(url.toString(), {
       method: "POST",
       headers: hdrs,
       body: params.body,
-      signal: controller.signal,
+      ...(signal ? { signal } : {}),
     });
-    clearTimeout(t);
+    if (t !== undefined) clearTimeout(t);
     const rawText = await res.text();
     logger.debug(`${params.label} status=${res.status} raw=${redactBody(rawText)}`);
     if (!res.ok) {
@@ -199,8 +371,10 @@ async function apiPostFetch(params: {
     }
     return rawText;
   } catch (err) {
-    clearTimeout(t);
+    if (t !== undefined) clearTimeout(t);
     throw err;
+  } finally {
+    cleanup();
   }
 }
 
@@ -215,6 +389,11 @@ export async function getUpdates(
     baseUrl: string;
     token?: string;
     timeoutMs?: number;
+    /**
+     * Optional external abort signal from the gateway. When stopping the channel,
+     * this aborts the in-flight long-poll immediately so hot reload can restart.
+     */
+    abortSignal?: AbortSignal;
   },
 ): Promise<GetUpdatesResp> {
   const timeout = params.timeoutMs ?? DEFAULT_LONG_POLL_TIMEOUT_MS;
@@ -229,13 +408,19 @@ export async function getUpdates(
       token: params.token,
       timeoutMs: timeout,
       label: "getUpdates",
+      abortSignal: params.abortSignal,
     });
     const resp: GetUpdatesResp = JSON.parse(rawText);
     return resp;
   } catch (err) {
-    // Long-poll timeout is normal; return empty response so caller can retry
+    // Long-poll timeout or external abort are both normal control-flow exits.
+    // The monitor loop checks abortSignal after return and exits when needed.
     if (err instanceof Error && err.name === "AbortError") {
-      logger.debug(`getUpdates: client-side timeout after ${timeout}ms, returning empty response`);
+      if (params.abortSignal?.aborted) {
+        logger.debug(`getUpdates: aborted by external signal`);
+      } else {
+        logger.debug(`getUpdates: client-side timeout after ${timeout}ms, returning empty response`);
+      }
       return { ret: 0, msgs: [], get_updates_buf: params.get_updates_buf };
     }
     throw err;
