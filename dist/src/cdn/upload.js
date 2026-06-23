@@ -5,6 +5,7 @@ import { getUploadUrl } from "../api/api.js";
 import { aesEcbPaddedSize } from "./aes-ecb.js";
 import { uploadBufferToCdn } from "./cdn-upload.js";
 import { logger } from "../util/logger.js";
+import { redactUrl } from "../util/redact.js";
 import { getExtensionFromContentTypeOrUrl } from "../media/mime.js";
 import { tempFileName } from "../util/random.js";
 import { UploadMediaType } from "../api/types.js";
@@ -13,10 +14,18 @@ import { UploadMediaType } from "../api/types.js";
  * Returns the local file path; extension is inferred from Content-Type / URL.
  */
 export async function downloadRemoteImageToTemp(url, destDir) {
-    logger.debug(`downloadRemoteImageToTemp: fetching url=${url}`);
-    const res = await fetch(url);
+    logger.debug(`downloadRemoteImageToTemp: fetching url=${redactUrl(url)}`);
+    let res;
+    try {
+        res = await fetch(url);
+    }
+    catch (err) {
+        const cause = err.cause ?? err.code ?? "";
+        logger.error(`downloadRemoteImageToTemp: fetch network error url=${redactUrl(url)} error=${String(err)}${cause ? ` cause=${cause}` : ""}`);
+        throw err;
+    }
     if (!res.ok) {
-        const msg = `remote media download failed: ${res.status} ${res.statusText} url=${url}`;
+        const msg = `remote media download failed: ${res.status} ${res.statusText} url=${redactUrl(url)}`;
         logger.error(`downloadRemoteImageToTemp: ${msg}`);
         throw new Error(msg);
     }
