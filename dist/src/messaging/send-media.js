@@ -2,7 +2,7 @@ import path from "node:path";
 import { logger } from "../util/logger.js";
 import { getMimeFromFilename } from "../media/mime.js";
 import { sendFileMessageWeixin, sendImageMessageWeixin, sendVideoMessageWeixin } from "./send.js";
-import { uploadFileAttachmentToWeixin, uploadFileToWeixin, uploadVideoToWeixin } from "../cdn/upload.js";
+import { uploadFileAttachmentToWeixin, uploadFileToWeixin, uploadVideoToWeixin, } from "../cdn/upload.js";
 /**
  * Upload a local file and send it as a weixin message, routing by MIME type:
  *   video/*  → uploadVideoToWeixin        + sendVideoMessageWeixin
@@ -25,7 +25,7 @@ export async function sendWeixinMediaFile(params) {
             cdnBaseUrl,
         });
         logger.info(`[weixin] sendWeixinMediaFile: video upload done filekey=${uploaded.filekey} size=${uploaded.fileSize}`);
-        return sendVideoMessageWeixin({ to, text, uploaded, opts });
+        return sendVideoMessageWeixin({ to, text, uploaded, opts, filePath, mediaMime: mime });
     }
     if (mime.startsWith("image/")) {
         logger.info(`[weixin] sendWeixinMediaFile: uploading image filePath=${filePath} to=${to}`);
@@ -36,7 +36,7 @@ export async function sendWeixinMediaFile(params) {
             cdnBaseUrl,
         });
         logger.info(`[weixin] sendWeixinMediaFile: image upload done filekey=${uploaded.filekey} size=${uploaded.fileSize}`);
-        return sendImageMessageWeixin({ to, text, uploaded, opts });
+        return sendImageMessageWeixin({ to, text, uploaded, opts, filePath, mediaMime: mime });
     }
     // File attachment: pdf, doc, zip, etc.
     const fileName = path.basename(filePath);
@@ -49,6 +49,6 @@ export async function sendWeixinMediaFile(params) {
         cdnBaseUrl,
     });
     logger.info(`[weixin] sendWeixinMediaFile: file upload done filekey=${uploaded.filekey} size=${uploaded.fileSize}`);
-    return sendFileMessageWeixin({ to, text, fileName, uploaded, opts });
+    return sendFileMessageWeixin({ to, text, fileName, uploaded, opts, filePath, mediaMime: mime });
 }
 //# sourceMappingURL=send-media.js.map

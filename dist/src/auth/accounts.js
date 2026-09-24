@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
 import { resolveStateDir } from "../storage/state-dir.js";
+import { deleteQuoteCacheForAccount } from "../messaging/quote-store.js";
 import { resolveFrameworkAllowFromPath } from "./pairing.js";
 import { logger } from "../util/logger.js";
 export const DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com";
@@ -180,6 +181,7 @@ export function saveWeixinAccount(accountId, update) {
  *   - credentials/openclaw-weixin-{accountId}-allowFrom.json (authorized users)
  */
 export function clearWeixinAccount(accountId) {
+    deleteQuoteCacheForAccount(accountId);
     const dir = resolveAccountsDir();
     const accountFiles = [
         `${accountId}.json`,

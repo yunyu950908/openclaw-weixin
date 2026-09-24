@@ -2,7 +2,29 @@ import { sendMessage as sendMessageApi } from "../api/api.js";
 import { logger } from "../util/logger.js";
 import { generateId } from "../util/random.js";
 import { MessageItemType, MessageState, MessageType } from "../api/types.js";
+import { getMediaLabel } from "./inbound.js";
+import { getQuoteStore } from "./quote-store.js";
 export { StreamingMarkdownFilter } from "./markdown-filter.js";
+async function cacheOutboundMessage(params) {
+    if (!params.opts.accountId || !params.serverMessageId)
+        return;
+    try {
+        await getQuoteStore()?.put({
+            accountId: params.opts.accountId,
+            conversationId: params.to,
+            messageId: params.serverMessageId,
+            direction: "outbound",
+            body: params.body,
+            ...(params.sourceMediaPath ? { sourceMediaPath: params.sourceMediaPath } : {}),
+            ...(params.mediaMime ? { mediaMime: params.mediaMime } : {}),
+            ...(params.mediaName ? { mediaName: params.mediaName } : {}),
+            createdAt: Date.now(),
+        });
+    }
+    catch (err) {
+        logger.warn(`quote cache: failed to save outbound message id=${params.serverMessageId}: ${String(err)}`);
+    }
+}
 function generateClientId() {
     return generateId("openclaw-weixin");
 }
@@ -53,18 +75,23 @@ export async function sendMessageWeixin(params) {
         clientId,
     });
     try {
-        await sendMessageApi({
+        const response = await sendMessageApi({
             baseUrl: opts.baseUrl,
             token: opts.token,
             timeoutMs: opts.timeoutMs,
             body: req,
         });
+        const serverMessageId = response?.message_id;
+        await cacheOutboundMessage({ opts, to, serverMessageId, body: text });
+        return {
+            messageId: clientId,
+            ...(serverMessageId ? { serverMessageId } : {}),
+        };
     }
     catch (err) {
         logger.error(`sendMessageWeixin: failed to=${to} clientId=${clientId} err=${String(err)}`);
         throw err;
     }
-    return { messageId: clientId };
 }
 /** Send a single structured MessageItem downstream. */
 export async function sendMessageItemWeixin(params) {
@@ -86,18 +113,25 @@ export async function sendMessageItemWeixin(params) {
         },
     };
     try {
-        await sendMessageApi({
+        const response = await sendMessageApi({
             baseUrl: opts.baseUrl,
             token: opts.token,
             timeoutMs: opts.timeoutMs,
             body: req,
         });
+        const serverMessageId = response?.message_id;
+        const itemText = item.type === MessageItemType.TEXT ? (item.text_item?.text ?? "") : "";
+        if (itemText)
+            await cacheOutboundMessage({ opts, to, serverMessageId, body: itemText });
+        return {
+            messageId: clientId,
+            ...(serverMessageId ? { serverMessageId } : {}),
+        };
     }
     catch (err) {
         logger.error(`${params.label ?? "sendMessageItemWeixin"}: failed to=${to} clientId=${clientId} err=${String(err)}`);
         throw err;
     }
-    return { messageId: clientId };
 }
 /**
  * Send one or more MessageItems (optionally preceded by a text caption) downstream.
@@ -112,6 +146,7 @@ async function sendMediaItems(params) {
     }
     items.push(mediaItem);
     let lastClientId = "";
+    let lastServerMessageId;
     for (const item of items) {
         lastClientId = generateClientId();
         const req = {
@@ -127,12 +162,32 @@ async function sendMediaItems(params) {
             },
         };
         try {
-            await sendMessageApi({
+            const response = await sendMessageApi({
                 baseUrl: opts.baseUrl,
                 token: opts.token,
                 timeoutMs: opts.timeoutMs,
                 body: req,
             });
+            lastServerMessageId = response?.message_id;
+            if (item.type === MessageItemType.TEXT) {
+                await cacheOutboundMessage({
+                    opts,
+                    to,
+                    serverMessageId: lastServerMessageId,
+                    body: item.text_item?.text ?? text,
+                });
+            }
+            else {
+                await cacheOutboundMessage({
+                    opts,
+                    to,
+                    serverMessageId: lastServerMessageId,
+                    body: getMediaLabel(item.type),
+                    sourceMediaPath: params.sourceMediaPath,
+                    mediaMime: params.mediaMime,
+                    mediaName: params.mediaName,
+                });
+            }
         }
         catch (err) {
             logger.error(`${label}: failed to=${to} clientId=${lastClientId} err=${String(err)}`);
@@ -140,7 +195,10 @@ async function sendMediaItems(params) {
         }
     }
     logger.info(`${label}: success to=${to} clientId=${lastClientId}`);
-    return { messageId: lastClientId };
+    return {
+        messageId: lastClientId,
+        ...(lastServerMessageId ? { serverMessageId: lastServerMessageId } : {}),
+    };
 }
 /**
  * Send an image message downstream using a previously uploaded file.
@@ -168,7 +226,16 @@ export async function sendImageMessageWeixin(params) {
             mid_size: uploaded.fileSizeCiphertext,
         },
     };
-    return sendMediaItems({ to, text, mediaItem: imageItem, opts, label: "sendImageMessageWeixin" });
+    return sendMediaItems({
+        to,
+        text,
+        mediaItem: imageItem,
+        opts,
+        label: "sendImageMessageWeixin",
+        sourceMediaPath: params.filePath,
+        mediaMime: params.mediaMime,
+        mediaName: params.filePath?.split(/[\\/]/).pop(),
+    });
 }
 /**
  * Send a video message downstream using a previously uploaded file.
@@ -191,7 +258,16 @@ export async function sendVideoMessageWeixin(params) {
             video_size: uploaded.fileSizeCiphertext,
         },
     };
-    return sendMediaItems({ to, text, mediaItem: videoItem, opts, label: "sendVideoMessageWeixin" });
+    return sendMediaItems({
+        to,
+        text,
+        mediaItem: videoItem,
+        opts,
+        label: "sendVideoMessageWeixin",
+        sourceMediaPath: params.filePath,
+        mediaMime: params.mediaMime,
+        mediaName: params.filePath?.split(/[\\/]/).pop(),
+    });
 }
 /**
  * Send a file attachment downstream using a previously uploaded file.
@@ -215,6 +291,15 @@ export async function sendFileMessageWeixin(params) {
             len: String(uploaded.fileSize),
         },
     };
-    return sendMediaItems({ to, text, mediaItem: fileItem, opts, label: "sendFileMessageWeixin" });
+    return sendMediaItems({
+        to,
+        text,
+        mediaItem: fileItem,
+        opts,
+        label: "sendFileMessageWeixin",
+        sourceMediaPath: params.filePath,
+        mediaMime: params.mediaMime,
+        mediaName: fileName,
+    });
 }
 //# sourceMappingURL=send.js.map

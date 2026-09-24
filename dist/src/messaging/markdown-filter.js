@@ -52,12 +52,20 @@ export class StreamingMarkdownFilter {
                 out += this.pumpSOL(eof);
             else
                 out += this.pumpBody(eof);
-            if (this.buf.length === sLen && this.sol === sSol &&
-                this.fence === sFence && this.inl === sInl)
+            if (this.buf.length === sLen &&
+                this.sol === sSol &&
+                this.fence === sFence &&
+                this.inl === sInl)
                 break;
         }
         if (eof && this.inl) {
-            const markers = { image: "![", bold3: "***", italic: "*", ubold3: "___", uitalic: "_" };
+            const markers = {
+                image: "![",
+                bold3: "***",
+                italic: "*",
+                ubold3: "___",
+                uitalic: "_",
+            };
             out += (markers[this.inl.type] ?? "") + this.inl.acc;
             this.inl = null;
         }

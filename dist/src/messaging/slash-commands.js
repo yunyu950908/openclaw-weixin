@@ -7,6 +7,7 @@ async function sendReply(ctx, text) {
         baseUrl: ctx.baseUrl,
         token: ctx.token,
         contextToken: ctx.contextToken,
+        accountId: ctx.accountId,
     };
     await sendMessageWeixin({ to: ctx.to, text, opts });
 }
@@ -47,9 +48,7 @@ export async function handleSlashCommand(content, ctx, receivedAt, eventTimestam
                 return { handled: true };
             case "/toggle-debug": {
                 const enabled = toggleDebugMode(ctx.accountId);
-                await sendReply(ctx, enabled
-                    ? "Debug 模式已开启"
-                    : "Debug 模式已关闭");
+                await sendReply(ctx, enabled ? "Debug 模式已开启" : "Debug 模式已关闭");
                 return { handled: true };
             }
             default:

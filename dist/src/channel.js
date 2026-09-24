@@ -4,13 +4,14 @@ import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtim
 import { registerWeixinAccountId, loadWeixinAccount, saveWeixinAccount, listWeixinAccountIds, resolveWeixinAccount, triggerWeixinChannelReload, clearStaleAccountsForUserId, DEFAULT_BASE_URL, } from "./auth/accounts.js";
 import { notifyStop, notifyStart } from "./api/api.js";
 import { assertSessionActive } from "./api/session-guard.js";
-import { getContextToken, findAccountIdsByContextToken, restoreContextTokens, clearContextTokensForAccount } from "./messaging/inbound.js";
+import { getContextToken, findAccountIdsByContextToken, restoreContextTokens, clearContextTokensForAccount, } from "./messaging/inbound.js";
+import { deactivateQuoteStoreAccount, initializeQuoteStore } from "./messaging/quote-store.js";
 import { logger } from "./util/logger.js";
 import { DEFAULT_ILINK_BOT_TYPE, startWeixinLoginWithQr, waitForWeixinLogin, displayQRCode, } from "./auth/login-qr.js";
 // Lazy-imported inside startAccount to avoid pulling in the monitor -> process-message ->
 // command-auth chain during plugin registration, which can re-enter plugin/provider registry
 // resolution before the account actually starts.
-import { applyWeixinMessageSendingHook, emitWeixinMessageSent } from "./messaging/outbound-hooks.js";
+import { applyWeixinMessageSendingHook, emitWeixinMessageSent, } from "./messaging/outbound-hooks.js";
 import { sendWeixinMediaFile } from "./messaging/send-media.js";
 import { sendMessageWeixin, StreamingMarkdownFilter } from "./messaging/send.js";
 import { downloadRemoteImageToTemp } from "./cdn/upload.js";
@@ -91,16 +92,32 @@ async function sendWeixinOutbound(params) {
     }
     filteredText = sendingResult.text;
     try {
-        const result = await sendMessageWeixin({ to: params.to, text: filteredText, opts: {
+        const result = await sendMessageWeixin({
+            to: params.to,
+            text: filteredText,
+            opts: {
                 baseUrl: account.baseUrl,
                 token: account.token,
                 contextToken: params.contextToken,
-            } });
-        emitWeixinMessageSent({ to: params.to, content: filteredText, success: true, accountId: account.accountId });
+                accountId: account.accountId,
+            },
+        });
+        emitWeixinMessageSent({
+            to: params.to,
+            content: filteredText,
+            success: true,
+            accountId: account.accountId,
+        });
         return { channel: "openclaw-weixin", messageId: result.messageId };
     }
     catch (err) {
-        emitWeixinMessageSent({ to: params.to, content: filteredText, success: false, error: String(err), accountId: account.accountId });
+        emitWeixinMessageSent({
+            to: params.to,
+            content: filteredText,
+            success: false,
+            error: String(err),
+            accountId: account.accountId,
+        });
         throw err;
     }
 }
@@ -124,6 +141,27 @@ export const weixinPlugin = {
                     type: "boolean",
                     default: true,
                     description: "Send structured tool-call progress messages.",
+                },
+                quoteCache: {
+                    type: "object",
+                    additionalProperties: false,
+                    description: "Persist message content locally so ID-only Weixin quotes can be resolved.",
+                    properties: {
+                        enabled: { type: "boolean", default: true },
+                        retentionDays: { type: "number", default: 30, minimum: 0.01 },
+                        maxMessagesPerAccount: { type: "integer", default: 10000, minimum: 1 },
+                        mediaRetentionDays: { type: "number", default: 7, minimum: 0.01 },
+                        maxMediaBytesPerAccount: {
+                            type: "integer",
+                            default: 268435456,
+                            minimum: 1,
+                        },
+                        maxSingleMediaBytes: {
+                            type: "integer",
+                            default: 26214400,
+                            minimum: 1,
+                        },
+                    },
                 },
             },
         },
@@ -219,29 +257,61 @@ export const weixinPlugin = {
                         filePath,
                         to: ctx.to,
                         text,
-                        opts: { baseUrl: account.baseUrl, token: account.token, contextToken },
+                        opts: {
+                            baseUrl: account.baseUrl,
+                            token: account.token,
+                            contextToken,
+                            accountId: account.accountId,
+                        },
                         cdnBaseUrl: account.cdnBaseUrl,
                     });
-                    emitWeixinMessageSent({ to: ctx.to, content: text, success: true, accountId: account.accountId });
+                    emitWeixinMessageSent({
+                        to: ctx.to,
+                        content: text,
+                        success: true,
+                        accountId: account.accountId,
+                    });
                     return { channel: "openclaw-weixin", messageId: result.messageId };
                 }
                 catch (err) {
-                    emitWeixinMessageSent({ to: ctx.to, content: text, success: false, error: String(err), accountId: account.accountId });
+                    emitWeixinMessageSent({
+                        to: ctx.to,
+                        content: text,
+                        success: false,
+                        error: String(err),
+                        accountId: account.accountId,
+                    });
                     throw err;
                 }
             }
             const contextToken = getContextToken(account.accountId, ctx.to);
             try {
-                const result = await sendMessageWeixin({ to: ctx.to, text, opts: {
+                const result = await sendMessageWeixin({
+                    to: ctx.to,
+                    text,
+                    opts: {
                         baseUrl: account.baseUrl,
                         token: account.token,
                         contextToken,
-                    } });
-                emitWeixinMessageSent({ to: ctx.to, content: text, success: true, accountId: account.accountId });
+                        accountId: account.accountId,
+                    },
+                });
+                emitWeixinMessageSent({
+                    to: ctx.to,
+                    content: text,
+                    success: true,
+                    accountId: account.accountId,
+                });
                 return { channel: "openclaw-weixin", messageId: result.messageId };
             }
             catch (err) {
-                emitWeixinMessageSent({ to: ctx.to, content: text, success: false, error: String(err), accountId: account.accountId });
+                emitWeixinMessageSent({
+                    to: ctx.to,
+                    content: text,
+                    success: false,
+                    error: String(err),
+                    accountId: account.accountId,
+                });
                 throw err;
             }
         },
@@ -358,6 +428,7 @@ export const weixinPlugin = {
                 ctx.setStatus?.({ accountId: account.accountId, running: false });
                 throw new Error("weixin not configured: missing token");
             }
+            await initializeQuoteStore(ctx.cfg, account.accountId);
             ctx.log?.info?.(`[${account.accountId}] starting weixin provider (${DEFAULT_BASE_URL})`);
             try {
                 const resp = await notifyStart({
@@ -399,6 +470,7 @@ export const weixinPlugin = {
         stopAccount: async (ctx) => {
             const account = ctx.account;
             const aLog = logger.withAccount(account.accountId);
+            deactivateQuoteStoreAccount(account.accountId);
             if (!account.configured || !account.token?.trim()) {
                 aLog.debug(`gateway.stopAccount: skip notifyStop (not configured or no token)`);
                 return;
