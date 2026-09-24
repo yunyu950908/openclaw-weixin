@@ -240,7 +240,9 @@ export async function waitForWeixinLogin(opts) {
                         };
                     }
                     process.stdout.write(`\n⏳ 二维码已过期，正在刷新...\n`);
-                    const expiredRefreshResult = await refreshQRCode(activeLogin, opts.botType || DEFAULT_ILINK_BOT_TYPE, qrRefreshCount, () => { scannedPrinted = false; });
+                    const expiredRefreshResult = await refreshQRCode(activeLogin, opts.botType || DEFAULT_ILINK_BOT_TYPE, qrRefreshCount, () => {
+                        scannedPrinted = false;
+                    });
                     if (!expiredRefreshResult.success) {
                         activeLogins.delete(opts.sessionKey);
                         return { connected: false, message: expiredRefreshResult.message };
@@ -261,7 +263,9 @@ export async function waitForWeixinLogin(opts) {
                             message: "多次输入错误，连接流程已停止。请稍后再试。",
                         };
                     }
-                    const blockedRefreshResult = await refreshQRCode(activeLogin, opts.botType || DEFAULT_ILINK_BOT_TYPE, qrRefreshCount, () => { scannedPrinted = false; });
+                    const blockedRefreshResult = await refreshQRCode(activeLogin, opts.botType || DEFAULT_ILINK_BOT_TYPE, qrRefreshCount, () => {
+                        scannedPrinted = false;
+                    });
                     if (!blockedRefreshResult.success) {
                         activeLogins.delete(opts.sessionKey);
                         return { connected: false, message: blockedRefreshResult.message };

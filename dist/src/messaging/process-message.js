@@ -1,6 +1,6 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { createTypingCallbacks } from "openclaw/plugin-sdk/channel-runtime";
+import { createTypingCallbacks } from "openclaw/plugin-sdk/channel-message";
 import { resolveSenderCommandAuthorizationWithRuntime, resolveDirectDmAuthorizationOutcome, } from "openclaw/plugin-sdk/command-auth";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
 import { sendTyping } from "../api/api.js";
@@ -15,11 +15,13 @@ import { redactBody, redactToken } from "../util/redact.js";
 import { isDebugMode } from "./debug-mode.js";
 import { sendWeixinErrorNotice } from "./error-notice.js";
 import { applyWeixinMessageSendingHook, emitWeixinMessageSent } from "./outbound-hooks.js";
-import { setContextToken, weixinMessageToMsgContext, getContextTokenFromMsgContext, isMediaItem, } from "./inbound.js";
+import { setContextToken, weixinMessageToMsgContext, getContextTokenFromMsgContext, getWeixinMessageId, isMediaItem, resolveStoredQuoteContext, } from "./inbound.js";
 import { sendWeixinMediaFile } from "./send-media.js";
 import { StreamingMarkdownFilter } from "./markdown-filter.js";
 import { sendMessageWeixin } from "./send.js";
 import { WeixinReplyProgressSender } from "./reply-progress-sender.js";
+import { withPublishedModelRuntime } from "./dispatch-options.js";
+import { getActiveQuoteMediaSubdir, getQuoteStore } from "./quote-store.js";
 import { handleSlashCommand } from "./slash-commands.js";
 const MEDIA_OUTBOUND_TEMP_DIR = path.join(resolvePreferredOpenClawTmpDir(), "weixin/media/outbound-temp");
 /** Extract text body from item_list (for slash command detection). */
@@ -89,11 +91,14 @@ export async function processOneMessage(full, deps) {
         const downloaded = await downloadMediaFromItem(mediaItem, {
             cdnBaseUrl: deps.cdnBaseUrl,
             saveMedia: deps.channelRuntime.media.saveMediaBuffer,
+            mediaSubdir: getActiveQuoteMediaSubdir(deps.accountId),
             log: deps.log,
             errLog: deps.errLog,
             label,
         });
         Object.assign(mediaOpts, downloaded);
+        if (refMediaItem)
+            mediaOpts.referencedMedia = true;
     }
     const mediaDownloadMs = Date.now() - mediaDownloadStart;
     if (debug) {
@@ -138,6 +143,28 @@ export async function processOneMessage(full, deps) {
     logger.debug(`authorization: senderId=${senderId} commandAuthorized=${String(commandAuthorized)} senderAllowed=${String(senderAllowedForCommands)}`);
     if (debug) {
         debugTrace.push("── 鉴权 & 路由 ──", `│ auth: cmdAuthorized=${String(commandAuthorized)} senderAllowed=${String(senderAllowedForCommands)}`);
+    }
+    resolveStoredQuoteContext(ctx, full, deps.accountId);
+    const inboundMessageId = getWeixinMessageId(full);
+    if (inboundMessageId) {
+        try {
+            await getQuoteStore()?.put({
+                accountId: deps.accountId,
+                conversationId: senderId,
+                messageId: inboundMessageId,
+                direction: "inbound",
+                body: ctx.Body,
+                ...(ctx.MediaPath ? { sourceMediaPath: ctx.MediaPath } : {}),
+                ...(ctx.MediaType ? { mediaMime: ctx.MediaType } : {}),
+                ...(mainMediaItem?.file_item?.file_name
+                    ? { mediaName: mainMediaItem.file_item.file_name }
+                    : {}),
+                createdAt: full.create_time_ms ?? Date.now(),
+            });
+        }
+        catch (err) {
+            logger.warn(`quote cache: failed to save inbound message id=${inboundMessageId}: ${String(err)}`);
+        }
     }
     const route = deps.channelRuntime.routing.resolveAgentRoute({
         cfg: deps.config,
@@ -190,6 +217,7 @@ export async function processOneMessage(full, deps) {
                 baseUrl: deps.baseUrl,
                 token: deps.token,
                 contextToken,
+                accountId: deps.accountId,
             },
         })
         : undefined;
@@ -279,13 +307,24 @@ export async function processOneMessage(full, deps) {
                     }
                     else {
                         logger.warn(`outbound: unrecognized mediaUrl scheme, sending text only mediaUrl=${mediaUrl.slice(0, 80)}`);
-                        await sendMessageWeixin({ to: ctx.To, text, opts: {
+                        await sendMessageWeixin({
+                            to: ctx.To,
+                            text,
+                            opts: {
                                 baseUrl: deps.baseUrl,
                                 token: deps.token,
                                 contextToken,
                                 runId,
-                            } });
-                        emitWeixinMessageSent({ to: ctx.To, content: text, success: true, accountId: deps.accountId, runId });
+                                accountId: deps.accountId,
+                            },
+                        });
+                        emitWeixinMessageSent({
+                            to: ctx.To,
+                            content: text,
+                            success: true,
+                            accountId: deps.accountId,
+                            runId,
+                        });
                         logger.info(`outbound: text sent to=${ctx.To}`);
                         return;
                     }
@@ -293,26 +332,56 @@ export async function processOneMessage(full, deps) {
                         filePath,
                         to: ctx.To,
                         text,
-                        opts: { baseUrl: deps.baseUrl, token: deps.token, contextToken, runId },
-                        cdnBaseUrl: deps.cdnBaseUrl,
-                    });
-                    emitWeixinMessageSent({ to: ctx.To, content: text, success: true, accountId: deps.accountId, runId });
-                    logger.info(`outbound: media sent OK to=${ctx.To}`);
-                }
-                else {
-                    logger.debug(`outbound: sending text message to=${ctx.To}`);
-                    await sendMessageWeixin({ to: ctx.To, text, opts: {
+                        opts: {
                             baseUrl: deps.baseUrl,
                             token: deps.token,
                             contextToken,
                             runId,
-                        } });
-                    emitWeixinMessageSent({ to: ctx.To, content: text, success: true, accountId: deps.accountId, runId });
+                            accountId: deps.accountId,
+                        },
+                        cdnBaseUrl: deps.cdnBaseUrl,
+                    });
+                    emitWeixinMessageSent({
+                        to: ctx.To,
+                        content: text,
+                        success: true,
+                        accountId: deps.accountId,
+                        runId,
+                    });
+                    logger.info(`outbound: media sent OK to=${ctx.To}`);
+                }
+                else {
+                    logger.debug(`outbound: sending text message to=${ctx.To}`);
+                    await sendMessageWeixin({
+                        to: ctx.To,
+                        text,
+                        opts: {
+                            baseUrl: deps.baseUrl,
+                            token: deps.token,
+                            contextToken,
+                            runId,
+                            accountId: deps.accountId,
+                        },
+                    });
+                    emitWeixinMessageSent({
+                        to: ctx.To,
+                        content: text,
+                        success: true,
+                        accountId: deps.accountId,
+                        runId,
+                    });
                     logger.info(`outbound: text sent OK to=${ctx.To}`);
                 }
             }
             catch (err) {
-                emitWeixinMessageSent({ to: ctx.To, content: text, success: false, error: String(err), accountId: deps.accountId, runId });
+                emitWeixinMessageSent({
+                    to: ctx.To,
+                    content: text,
+                    success: false,
+                    error: String(err),
+                    accountId: deps.accountId,
+                    runId,
+                });
                 logger.error(`outbound: FAILED to=${ctx.To} mediaUrl=${mediaUrl ?? "none"} err=${String(err)} stack=${err.stack ?? ""}`);
                 throw err;
             }
@@ -339,6 +408,7 @@ export async function processOneMessage(full, deps) {
                 baseUrl: deps.baseUrl,
                 token: deps.token,
                 runId,
+                accountId: deps.accountId,
                 errLog: deps.errLog,
             });
         },
@@ -347,7 +417,7 @@ export async function processOneMessage(full, deps) {
     try {
         await deps.channelRuntime.reply.withReplyDispatcher({
             dispatcher,
-            run: () => deps.channelRuntime.reply.dispatchReplyFromConfig({
+            run: () => deps.channelRuntime.reply.dispatchReplyFromConfig(withPublishedModelRuntime({
                 ctx: finalized,
                 cfg: deps.config,
                 dispatcher,
@@ -356,7 +426,7 @@ export async function processOneMessage(full, deps) {
                     ...(replyProgressSender?.replyOptions ?? {}),
                     disableBlockStreaming: true,
                 },
-            }),
+            })),
         });
         logger.debug(`dispatchReplyFromConfig: done agentId=${route.agentId ?? "(none)"}`);
     }
@@ -393,7 +463,13 @@ export async function processOneMessage(full, deps) {
                 await sendMessageWeixin({
                     to: ctx.To,
                     text: timingText,
-                    opts: { baseUrl: deps.baseUrl, token: deps.token, contextToken, runId },
+                    opts: {
+                        baseUrl: deps.baseUrl,
+                        token: deps.token,
+                        contextToken,
+                        runId,
+                        accountId: deps.accountId,
+                    },
                 });
                 logger.info(`debug-timing: sent OK`);
             }

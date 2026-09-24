@@ -21,7 +21,7 @@ export class WeixinReplyProgressSender {
         this.runId = deps.runId;
         this.to = deps.to;
         this.accountId = deps.accountId;
-        this.opts = { ...deps.opts, runId: deps.runId };
+        this.opts = { ...deps.opts, runId: deps.runId, accountId: deps.accountId };
     }
     get replyOptions() {
         return {
