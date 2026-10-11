@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
+import { mutateConfigFile } from "openclaw/plugin-sdk/config-mutation";
 import { resolveStateDir } from "../storage/state-dir.js";
 import { deleteQuoteCacheForAccount } from "../messaging/quote-store.js";
 import { resolveFrameworkAllowFromPath } from "./pairing.js";
@@ -278,21 +279,18 @@ export function loadConfigBotAgent() {
  */
 export async function triggerWeixinChannelReload() {
     try {
-        const { loadConfig, writeConfigFile } = await import("openclaw/plugin-sdk/config-runtime");
-        const cfg = loadConfig();
-        const channels = (cfg.channels ?? {});
-        const existing = channels["openclaw-weixin"] ?? {};
-        const updated = {
-            ...cfg,
-            channels: {
-                ...channels,
-                "openclaw-weixin": {
+        await mutateConfigFile({
+            afterWrite: { mode: "auto" },
+            mutate(draft) {
+                draft.channels ??= {};
+                const channels = draft.channels;
+                const existing = channels["openclaw-weixin"] ?? {};
+                channels["openclaw-weixin"] = {
                     ...existing,
                     channelConfigUpdatedAt: new Date().toISOString(),
-                },
+                };
             },
-        };
-        await writeConfigFile(updated);
+        });
         logger.info("triggerWeixinChannelReload: wrote channel config to openclaw.json");
     }
     catch (err) {

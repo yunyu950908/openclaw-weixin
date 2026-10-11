@@ -6,11 +6,18 @@
 
 ## [未发布]
 
+## [2.4.10] - 2026-10-10
+
+### 修复
+
+- **OpenClaw 2026.10 插件兼容性：** 更新消息入口授权、输入状态回调、临时目录与配置修改所用的 Plugin SDK 接口，修复新版 OpenClaw 无法加载微信插件的问题，并保留对旧版稳定版的兼容（#338）。
+- **配对数据读取：** 移除没有生产调用者的配对文件写入器及旧锁依赖，保留配对读取与账号清理行为；补充读取缺失或损坏文件时不写回文件的校验（#271，感谢 @steipete）。
+
 ## [2.4.9] - 2026-09-17
 
 ### 修复
 
-- **OpenClaw 2026.9.x 入站回复兼容性：** 为低层 `dispatchReplyFromConfig` 调用绑定 Gateway 已发布的模型运行时，修复 `PreparedModelCatalogConfigReplacedError` 导致微信入站消息丢失的问题（#311、#312）。
+- **OpenClaw 2026.9.x 入站回复兼容性：** 为低层 `dispatchReplyFromConfig` 调用绑定 Gateway 已发布的模型运行时，修复 `PreparedModelCatalogConfigReplacedError` 导致微信入站消息丢失的问题（#311、#312；方案受 @yuzheng14 提交的 #313 启发）。
 
 ## [2.4.9-beta.0] - 2026-09-08
 
