@@ -6,11 +6,18 @@ This project follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [2.4.10] - 2026-10-10
+
+### 修复
+
+- **OpenClaw 2026.10 插件兼容性：** 更新消息入口授权、输入状态回调、临时目录与配置修改所用的 Plugin SDK 接口，修复新版 OpenClaw 无法加载微信插件的问题，并保留对旧版稳定版的兼容（#338）。
+- **配对数据读取：** 移除没有生产调用者的配对文件写入器及旧锁依赖，保留配对读取与账号清理行为；补充读取缺失或损坏文件时不写回文件的校验（#271，感谢 @steipete）。
+
 ## [2.4.9] - 2026-09-17
 
 ### Fixed
 
-- **OpenClaw 2026.9.x inbound-reply compatibility:** Bind the low-level `dispatchReplyFromConfig` call to the Gateway-published model runtime, fixing lost Weixin inbound messages caused by `PreparedModelCatalogConfigReplacedError` (#311, #312).
+- **OpenClaw 2026.9.x inbound-reply compatibility:** Bind the low-level `dispatchReplyFromConfig` call to the Gateway-published model runtime, fixing lost Weixin inbound messages caused by `PreparedModelCatalogConfigReplacedError` (#311, #312; solution inspired by #313 from @yuzheng14).
 
 ## [2.4.9-beta.0] - 2026-09-08
 

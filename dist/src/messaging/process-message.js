@@ -1,8 +1,6 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { createTypingCallbacks } from "openclaw/plugin-sdk/channel-message";
-import { resolveSenderCommandAuthorizationWithRuntime, resolveDirectDmAuthorizationOutcome, } from "openclaw/plugin-sdk/command-auth";
-import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
+import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
 import { sendTyping } from "../api/api.js";
 import { MessageItemType, TypingStatus } from "../api/types.js";
 import { loadWeixinAccount } from "../auth/accounts.js";
@@ -21,6 +19,8 @@ import { StreamingMarkdownFilter } from "./markdown-filter.js";
 import { sendMessageWeixin } from "./send.js";
 import { WeixinReplyProgressSender } from "./reply-progress-sender.js";
 import { withPublishedModelRuntime } from "./dispatch-options.js";
+import { resolveWeixinInboundAuthorization } from "./authorization.js";
+import { loadTypingCallbacksFactory } from "./typing.js";
 import { getActiveQuoteMediaSubdir, getQuoteStore } from "./quote-store.js";
 import { handleSlashCommand } from "./slash-commands.js";
 const MEDIA_OUTBOUND_TEMP_DIR = path.join(resolvePreferredOpenClawTmpDir(), "weixin/media/outbound-temp");
@@ -111,38 +111,24 @@ export async function processOneMessage(full, deps) {
     const rawBody = ctx.Body?.trim() ?? "";
     ctx.CommandBody = rawBody;
     const senderId = full.from_user_id ?? "";
-    const { senderAllowedForCommands, commandAuthorized } = await resolveSenderCommandAuthorizationWithRuntime({
-        cfg: deps.config,
-        rawBody,
-        isGroup: false,
-        dmPolicy: "pairing",
-        configuredAllowFrom: [],
-        configuredGroupAllowFrom: [],
+    const fromStore = readFrameworkAllowFromList(deps.accountId);
+    const uid = loadWeixinAccount(deps.accountId)?.userId?.trim();
+    const { senderAllowed, commandAuthorized } = await resolveWeixinInboundAuthorization({
+        accountId: deps.accountId,
         senderId,
-        isSenderAllowed: (id, list) => list.length === 0 || list.includes(id),
-        /** Pairing: framework credentials `*-allowFrom.json`, with account `userId` fallback for legacy installs. */
-        readAllowFromStore: async () => {
-            const fromStore = readFrameworkAllowFromList(deps.accountId);
-            if (fromStore.length > 0)
-                return fromStore;
-            const uid = loadWeixinAccount(deps.accountId)?.userId?.trim();
-            return uid ? [uid] : [];
-        },
-        runtime: deps.channelRuntime.commands,
+        rawBody,
+        config: deps.config,
+        commands: deps.channelRuntime.commands,
+        allowFrom: fromStore.length > 0 ? fromStore : uid ? [uid] : [],
     });
-    const directDmOutcome = resolveDirectDmAuthorizationOutcome({
-        isGroup: false,
-        dmPolicy: "pairing",
-        senderAllowedForCommands,
-    });
-    if (directDmOutcome === "disabled" || directDmOutcome === "unauthorized") {
-        logger.info(`authorization: dropping message from=${senderId} outcome=${directDmOutcome}`);
+    if (!senderAllowed) {
+        logger.info(`authorization: dropping message from=${senderId} outcome=unauthorized`);
         return;
     }
     ctx.CommandAuthorized = commandAuthorized;
-    logger.debug(`authorization: senderId=${senderId} commandAuthorized=${String(commandAuthorized)} senderAllowed=${String(senderAllowedForCommands)}`);
+    logger.debug(`authorization: senderId=${senderId} commandAuthorized=${String(commandAuthorized)} senderAllowed=${String(senderAllowed)}`);
     if (debug) {
-        debugTrace.push("── 鉴权 & 路由 ──", `│ auth: cmdAuthorized=${String(commandAuthorized)} senderAllowed=${String(senderAllowedForCommands)}`);
+        debugTrace.push("── 鉴权 & 路由 ──", `│ auth: cmdAuthorized=${String(commandAuthorized)} senderAllowed=${String(senderAllowed)}`);
     }
     resolveStoredQuoteContext(ctx, full, deps.accountId);
     const inboundMessageId = getWeixinMessageId(full);
@@ -223,6 +209,7 @@ export async function processOneMessage(full, deps) {
         : undefined;
     const humanDelay = deps.channelRuntime.reply.resolveHumanDelayConfig(deps.config, route.agentId);
     const hasTypingTicket = Boolean(deps.typingTicket);
+    const createTypingCallbacks = await loadTypingCallbacksFactory();
     const typingCallbacks = createTypingCallbacks({
         start: hasTypingTicket
             ? () => sendTyping({
